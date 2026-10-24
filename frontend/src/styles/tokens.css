@@ -1,0 +1,70 @@
+:root {
+  --ink: #1a2421;
+  --ink-muted: #4a5854;
+  --paper: #f3f0e8;
+  --paper-2: #e8e4d9;
+  --panel: rgba(255, 252, 245, 0.92);
+  --line: rgba(26, 36, 33, 0.12);
+  --accent: #0f6b5c;
+  --accent-soft: #d8eee8;
+  --warn: #9a5b1a;
+  --danger: #8b2e2e;
+  --ok: #1f6b3a;
+  --shadow: 0 12px 40px rgba(26, 36, 33, 0.08);
+  --radius: 14px;
+  --font-display: "Fraunces", "Times New Roman", serif;
+  --font-body: "Source Sans 3", "Segoe UI", sans-serif;
+  --touch: 44px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-body);
+  background:
+    radial-gradient(1200px 600px at 10% -10%, #dfece7 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, #ebe4d4 0%, transparent 50%),
+    linear-gradient(180deg, #f7f4ec 0%, var(--paper) 45%, var(--paper-2) 100%);
+  background-attachment: fixed;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  z-index: 0;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 560;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
