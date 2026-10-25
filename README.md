@@ -77,9 +77,3 @@ Responsive: mobile stack (approvals high), tablet 2-col, desktop 3-col.
 3. Run a schedule command — watch live logs.
 4. Approve a pending action if proposed.
 5. Confirm schedule refresh; optional Resend follow-up to your verified inbox.
-
-## Pitfalls avoided
-
-1. Not a chatbot-only UI — schedule, logs, approvals, preferences are first-class.  
-2. FE consumes real backend contracts — no fake automation data.  
-3. Free-tier APIs only; Resend uses `onboarding@resend.dev` until you verify a domain.
