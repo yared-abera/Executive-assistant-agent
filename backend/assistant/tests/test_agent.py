@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 from django.test import TestCase
 
 from assistant.agent import run_executive_agent
+from assistant.calendar_service import executive_today_iso, executive_tomorrow_iso
 from assistant.models import PendingAction
 
 
@@ -65,6 +66,13 @@ class AgentTests(TestCase):
         batched = chat.send_message.call_args_list[1].args[0]
         self.assertIsInstance(batched, list)
         self.assertEqual(len(batched), 2)
+
+        # System instruction must pin real executive today/tomorrow
+        create_kwargs = client.chats.create.call_args.kwargs
+        instruction = create_kwargs["config"].system_instruction
+        self.assertIn(executive_today_iso(), instruction)
+        self.assertIn(executive_tomorrow_iso(), instruction)
+        self.assertIn("do not invent dates", instruction.lower())
 
     @patch("assistant.agent.get_gemini_client", side_effect=Exception("quota"))
     @patch("assistant.agent.retrieve_relevant_preferences", return_value="rules")

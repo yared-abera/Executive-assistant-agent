@@ -1,6 +1,6 @@
 # Executive Assistant AI
 
-Full-stack Autonomous AI Executive Assistant (Brain3 assignment): Gemini ReAct agent + Google Calendar + SendGrid + Supabase RAG + Socket.IO dashboard.
+Full-stack Autonomous AI Executive Assistant (Brain3 assignment): Gemini ReAct agent + Google Calendar + Resend + Supabase RAG + Socket.IO dashboard.
 
 ```
 executive-assistant-AI/
@@ -76,10 +76,10 @@ Responsive: mobile stack (approvals high), tablet 2-col, desktop 3-col.
 2. Save a preference (e.g. no meetings before 10 AM).
 3. Run a schedule command — watch live logs.
 4. Approve a pending action if proposed.
-5. Confirm schedule refresh; optional SendGrid follow-up when your key is ready.
+5. Confirm schedule refresh; optional Resend follow-up to your verified inbox.
 
 ## Pitfalls avoided
 
 1. Not a chatbot-only UI — schedule, logs, approvals, preferences are first-class.  
 2. FE consumes real backend contracts — no fake automation data.  
-3. Free-tier APIs only; SendGrid may simulate until verified sender works.
+3. Free-tier APIs only; Resend uses `onboarding@resend.dev` until you verify a domain.

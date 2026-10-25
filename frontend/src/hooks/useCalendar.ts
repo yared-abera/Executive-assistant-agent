@@ -2,8 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { fetchCalendarEvents } from "../api/client";
 import type { CalendarEvent } from "../types";
 
+/** Local calendar date (not UTC) so midnight near UTC+ offsets stays correct. */
 function todayISO() {
-  return new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 export function useCalendar(initialDate = todayISO()) {

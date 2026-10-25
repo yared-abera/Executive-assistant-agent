@@ -1,13 +1,9 @@
-"""Agent tools: Google Calendar + SendGrid (with local simulate fallbacks)."""
+"""Agent tools: Google Calendar + Resend email (with local simulate fallbacks)."""
 
-from __future__ import annotations
-
+# Do not use postponed annotations here — google-genai AFC uses isinstance() on
+# runtime type hints; stringified annotations raise TypeError on Python 3.14+.
 import json
 import os
-from typing import Optional
-
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
 
 from .calendar_service import (
     create_event,
@@ -15,14 +11,20 @@ from .calendar_service import (
     list_events_for_date,
     propose_alternate_slots as find_alternate_slots,
 )
-from .clients import sendgrid_configured
+from .clients import resend_configured
+from .memory import date_blocked_by_preferences, retrieve_relevant_preferences
 
 
 def check_calendar_conflicts(date_str: str) -> str:
     """Check existing events on the user's calendar for a specific date (YYYY-MM-DD)."""
     try:
+        prefs = retrieve_relevant_preferences(f"schedule on {date_str}")
+        blocked = date_blocked_by_preferences(date_str, prefs)
         events = list_events_for_date(date_str)
-        return format_schedule_summary(date_str, events)
+        summary = format_schedule_summary(date_str, events)
+        if blocked:
+            return f"{summary}\n{blocked}"
+        return summary
     except Exception as exc:
         return f"Calendar check failed for {date_str}: {exc}"
 
@@ -44,6 +46,10 @@ def book_calendar_meeting(
         attendee_email: Optional attendee email to invite.
     """
     try:
+        prefs = retrieve_relevant_preferences(f"book meeting {title} on {date_str}")
+        blocked = date_blocked_by_preferences(date_str, prefs)
+        if blocked:
+            return f"Booking refused. {blocked}"
         result = create_event(
             title=title,
             date_str=date_str,
@@ -67,6 +73,13 @@ def propose_alternate_slots(
     Prefer earliest_hour=10 when the executive dislikes early meetings.
     """
     try:
+        prefs = retrieve_relevant_preferences(f"open slots on {date_str}")
+        blocked = date_blocked_by_preferences(date_str, prefs)
+        if blocked:
+            return (
+                f"No slots offered on {date_str}. {blocked} "
+                "Propose times on the next allowed weekday instead."
+            )
         slots = find_alternate_slots(
             date_str=date_str,
             duration_minutes=duration_minutes,
@@ -83,25 +96,63 @@ def propose_alternate_slots(
         return f"Could not propose slots: {exc}"
 
 
-def send_email_notification(to_email: str, subject: str, message_body: str) -> str:
-    """Dispatches an email notification or follow-up via SendGrid API."""
-    if not sendgrid_configured():
-        return (
-            f"[Simulated Email] To: {to_email} | Subject: {subject} | Content: {message_body}"
-        )
-
-    from_email = os.environ.get("SENDGRID_FROM_EMAIL", "assistant@yourdomain.com")
-    message = Mail(
-        from_email=from_email,
-        to_emails=to_email,
-        subject=subject,
-        html_content=f"<p>{message_body}</p>",
+def _simulated_email(to_email: str, subject: str, message_body: str, reason: str = "") -> str:
+    note = f" ({reason})" if reason else ""
+    return (
+        f"[Simulated Email]{note} To: {to_email} | Subject: {subject} | Content: {message_body}"
     )
+
+
+def _is_resend_domain_block(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "domain is not verified",
+            "only send testing emails",
+            "verify a domain",
+            "resend.com/domains",
+        )
+    )
+
+
+def send_email_notification(to_email: str, subject: str, message_body: str) -> str:
+    """Dispatches an email notification or follow-up via Resend API.
+
+    Falls back to a simulated send when Resend rejects unverified domains /
+    test-sender limits so demos stay usable without a paid custom domain.
+    """
+    if not resend_configured():
+        return _simulated_email(to_email, subject, message_body, "RESEND_API_KEY unset")
+
+    force_sim = (os.environ.get("EMAIL_MODE") or "").strip().lower() == "simulate"
+    if force_sim:
+        return _simulated_email(to_email, subject, message_body, "EMAIL_MODE=simulate")
+
+    import resend
+
+    from_email = (os.environ.get("RESEND_FROM_EMAIL") or "beth.t@example.com").strip().strip('"').strip("'")
+    resend.api_key = os.environ["RESEND_API_KEY"].strip().strip('"').strip("'")
     try:
-        sg = SendGridAPIClient(os.environ["SENDGRID_API_KEY"])
-        response = sg.send(message)
-        return f"Email sent successfully. Status code: {response.status_code}"
+        result = resend.Emails.send(
+            {
+                "from": from_email,
+                "to": [to_email],
+                "subject": subject,
+                "html": f"<p>{message_body}</p>",
+            }
+        )
+        email_id = result.get("id") if isinstance(result, dict) else getattr(result, "id", None)
+        return f"Email sent successfully via Resend. Id: {email_id}"
     except Exception as e:
+        if _is_resend_domain_block(e):
+            return _simulated_email(
+                to_email,
+                subject,
+                message_body,
+                "Resend blocked send — verify your own domain or use EMAIL_MODE=simulate; "
+                f"raw error: {e}",
+            )
         return f"Email failed: {str(e)}"
 
 
@@ -110,7 +161,7 @@ def draft_reschedule_email(
     original_meeting: str,
     proposed_times: str,
 ) -> str:
-    """Draft (and send if SendGrid configured) a polite reschedule email after a decline."""
+    """Draft (and send if Resend configured) a polite reschedule email after a decline."""
     subject = f"Rescheduling: {original_meeting}"
     body = (
         f"Hi,<br/><br/>"

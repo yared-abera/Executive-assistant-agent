@@ -2,6 +2,7 @@ import type {
   ApiErrorBody,
   CalendarEvent,
   PendingAction,
+  StoredPreference,
 } from "../types";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
@@ -36,6 +37,17 @@ export function savePreference(preference: string) {
       method: "POST",
       body: JSON.stringify({ preference }),
     },
+  );
+}
+
+export function fetchPreferences() {
+  return request<{ items: StoredPreference[] }>("/api/agent/preferences/");
+}
+
+export function deletePreference(id: number) {
+  return request<{ status: string; message: string }>(
+    `/api/agent/preference/${id}/`,
+    { method: "DELETE" },
   );
 }
 

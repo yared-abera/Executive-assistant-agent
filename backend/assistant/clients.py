@@ -56,6 +56,26 @@ def google_calendar_configured() -> bool:
     )
 
 
-def sendgrid_configured() -> bool:
-    key = os.environ.get("SENDGRID_API_KEY", "")
-    return bool(key) and key not in ("your_sendgrid_api_key", "your_")
+def calendar_mode() -> str:
+    """mock | google | auto — controls whether Google Calendar is attempted."""
+    mode = (os.environ.get("CALENDAR_MODE") or "auto").strip().lower()
+    if mode not in ("mock", "google", "auto"):
+        return "auto"
+    return mode
+
+
+def use_google_calendar() -> bool:
+    """True when Google Calendar API calls should be attempted."""
+    if calendar_mode() == "mock":
+        return False
+    return google_calendar_configured()
+
+
+def resend_configured() -> bool:
+    key = os.environ.get("RESEND_API_KEY", "")
+    return bool(key) and key.startswith("re_")
+
+
+# Back-compat alias used by older call sites / docs
+def email_configured() -> bool:
+    return resend_configured()

@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from google.genai import types
 
+from .calendar_service import executive_clock_context
 from .clients import ConfigurationError, get_gemini_client
 from .memory import retrieve_relevant_preferences
 from .pending import create_pending_action
@@ -63,34 +64,69 @@ def run_executive_agent(
 
     try:
         relevant_rules = retrieve_relevant_preferences(user_command)
+        clock = executive_clock_context()
         _log(
-            {"type": "thought", "detail": f"Retrieved Executive Rules: {relevant_rules}"}
+            {
+                "type": "thought",
+                "detail": (
+                    f"Retrieved Executive Rules: {relevant_rules} | "
+                    f"Clock {clock['timezone']} today={clock['today']} "
+                    f"tomorrow={clock['tomorrow']}"
+                ),
+            }
         )
 
         system_instruction = f"""
 You are an autonomous AI Executive Assistant for a tech-startup executive.
 You schedule meetings, resolve calendar conflicts, and send follow-up emails.
 
-Executive Rules & Preferences (must follow):
+Executive clock (authoritative — do not invent dates):
+- Timezone: {clock['timezone']}
+- Today ({clock['weekday']}): {clock['today']}
+- Tomorrow: {clock['tomorrow']}
+- Current local time: {clock['local_time']}
+
+When the user says "today", "tomorrow", or a weekday relative to now, convert to
+YYYY-MM-DD using ONLY the dates above. Always pass date_str as YYYY-MM-DD to tools.
+Never invent or reuse example dates from training data.
+
+Executive Rules & Preferences (MUST follow — these override the user's preferred day/time):
 {relevant_rules}
+
+If a preference forbids meetings on a weekday (e.g. "No meetings on Monday"):
+- Do NOT call book_calendar_meeting for that weekday.
+- Remind the user in plain language that they set that preference (quote the exact rule),
+  say that day is unavailable, and mention they can delete it under Preferences if they
+  want to allow that weekday again.
+- Then propose times on the next allowed day (propose_alternate_slots on an allowed date,
+  or ask the user to pick another day).
 
 Workflow for scheduling:
 1. Always call check_calendar_conflicts for the requested date first.
 2. If the requested time conflicts, call propose_alternate_slots (respect no-meetings-before rules).
 3. Explain conflicts and proposed alternatives clearly.
-4. Only call book_calendar_meeting when the requested slot is free OR the user already chose an alternate.
+4. Only call book_calendar_meeting when the requested slot is free OR the user already chose an alternate,
+   AND the date is not banned by preferences.
 5. For follow-ups / confirmations, use send_email_notification.
 6. Prefer proposing alternatives over silently moving existing meetings.
 7. Never invent calendar data — rely on tool observations.
+8. If a tool reports a local/mock schedule (Google unreachable or CALENDAR_MODE=mock),
+   treat that observation as authoritative for availability in this demo.
 """
 
         client = get_gemini_client()
         chat = client.chats.create(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash-lite",
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 tools=AGENT_TOOLS,
                 temperature=0.2,
+                # We run tools in the ReAct loop below. Leaving AFC on makes the
+                # SDK invoke callables itself and can crash on postponed annotations
+                # (isinstance() arg 2 must be a type...) under Python 3.14+.
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True
+                ),
             ),
         )
 

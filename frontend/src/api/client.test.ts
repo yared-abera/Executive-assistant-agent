@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   approvePending,
+  deletePreference,
   fetchCalendarEvents,
   fetchPending,
+  fetchPreferences,
   rejectPending,
   savePreference,
-}  from "./client";
+} from "./client";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -49,6 +51,23 @@ describe("api client", () => {
     expect(fetch).toHaveBeenCalledWith(
       expect.stringContaining("/api/agent/preference/"),
       expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("lists and deletes preferences", async () => {
+    mockJson({ items: [{ id: 3, content: "No meetings on monday" }] });
+    const listed = await fetchPreferences();
+    expect(listed.items[0].id).toBe(3);
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/agent/preferences/"),
+      expect.any(Object),
+    );
+
+    mockJson({ status: "success", message: "Deleted preference: 'No meetings on monday'" });
+    await expect(deletePreference(3)).resolves.toMatchObject({ status: "success" });
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/agent/preference/3/"),
+      expect.objectContaining({ method: "DELETE" }),
     );
   });
 

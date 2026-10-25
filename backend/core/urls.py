@@ -15,6 +15,8 @@ from assistant.views import (
     PendingActionApproveView,
     PendingActionListView,
     PendingActionRejectView,
+    PreferenceDeleteView,
+    PreferenceListView,
 )
 
 urlpatterns = [
@@ -26,6 +28,16 @@ urlpatterns = [
         name="agent-command-stream",
     ),
     path("api/agent/preference/", AddPreferenceView.as_view(), name="add-preference"),
+    path(
+        "api/agent/preferences/",
+        PreferenceListView.as_view(),
+        name="list-preferences",
+    ),
+    path(
+        "api/agent/preference/<int:pk>/",
+        PreferenceDeleteView.as_view(),
+        name="delete-preference",
+    ),
     path("api/calendar/events/", CalendarEventsView.as_view(), name="calendar-events"),
     path("api/agent/pending/", PendingActionListView.as_view(), name="pending-list"),
     path(

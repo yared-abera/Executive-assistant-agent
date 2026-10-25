@@ -30,6 +30,11 @@ export interface CalendarEvent {
   source?: string;
 }
 
+export interface StoredPreference {
+  id: number;
+  content: string;
+}
+
 export interface AgentDonePayload {
   final_response?: string | null;
   logs?: AgentLogEntry[];

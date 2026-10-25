@@ -8,4 +8,4 @@ python manage.py migrate
 uvicorn core.asgi:application --reload --host 127.0.0.1 --port 8000
 ```
 
-Copy `.env.example` → `.env` and fill Gemini, Google Calendar, SendGrid, Supabase keys.
+Copy `.env.example` → `.env` and fill Gemini, Google Calendar, Resend, Supabase keys.

@@ -2,14 +2,28 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import threading
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from .clients import google_calendar_configured
+from .clients import use_google_calendar
+
+logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
+# Keep Google HTTP calls short so a flaky path fails fast instead of hanging ~120s.
+GOOGLE_HTTP_TIMEOUT_SEC = float(os.environ.get("GOOGLE_HTTP_TIMEOUT_SEC", "8"))
+# After a timeout, skip Google for a bit so the agent/UI stay responsive.
+GOOGLE_CIRCUIT_COOLDOWN_SEC = float(os.environ.get("GOOGLE_CIRCUIT_COOLDOWN_SEC", "300"))
+
+_creds_lock = threading.Lock()
+_cached_creds = None  # google.oauth2.credentials.Credentials | None
+_last_fetch_degraded = False
+_circuit_open_until = 0.0
 
 # Deterministic mock schedule used when OAuth credentials are absent (local/demo/tests).
 MOCK_EVENTS_BY_WEEKDAY = {
@@ -41,26 +55,132 @@ def _timezone() -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
+def executive_timezone_name() -> str:
+    return str(_timezone())
+
+
+def executive_now() -> datetime:
+    """Current instant in EXECUTIVE_TIMEZONE."""
+    return datetime.now(_timezone())
+
+
+def executive_today_iso() -> str:
+    return executive_now().date().isoformat()
+
+
+def executive_tomorrow_iso() -> str:
+    return (executive_now().date() + timedelta(days=1)).isoformat()
+
+
+def executive_clock_context() -> Dict[str, str]:
+    """Timezone-aware clock snapshot for the agent system prompt."""
+    now = executive_now()
+    return {
+        "timezone": executive_timezone_name(),
+        "today": now.date().isoformat(),
+        "tomorrow": (now.date() + timedelta(days=1)).isoformat(),
+        "local_time": now.strftime("%H:%M"),
+        "weekday": now.strftime("%A"),
+    }
+
+
 def _calendar_id() -> str:
     return os.environ.get("GOOGLE_CALENDAR_ID", "primary")
 
 
-def get_calendar_service():
+def _timed_auth_request():
+    """google-auth Request that always uses a bounded HTTP timeout."""
     from google.auth.transport.requests import Request
+
+    class TimedRequest(Request):
+        def __call__(self, url, method="GET", body=None, headers=None, timeout=None, **kwargs):
+            return super().__call__(
+                url,
+                method=method,
+                body=body,
+                headers=headers,
+                timeout=timeout if timeout is not None else GOOGLE_HTTP_TIMEOUT_SEC,
+                **kwargs,
+            )
+
+    return TimedRequest()
+
+
+def _is_transient_network_error(exc: BaseException) -> bool:
+    name = type(exc).__name__
+    text = str(exc).lower()
+    markers = (
+        "timed out",
+        "timeout",
+        "max retries exceeded",
+        "connection reset",
+        "temporarily unavailable",
+        "name or service not known",
+        "failed to establish a new connection",
+        "connecttimeout",
+        "readtimeout",
+    )
+    if any(m in text for m in markers):
+        return True
+    if name in {
+        "ConnectTimeoutError",
+        "ReadTimeoutError",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "ConnectionError",
+        "TimeoutError",
+        "SSLError",
+    }:
+        return True
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    return bool(cause) and _is_transient_network_error(cause)
+
+
+def _get_credentials():
+    """Return cached OAuth credentials; refresh only when expired/missing."""
+    global _cached_creds
     from google.oauth2.credentials import Credentials
+
+    with _creds_lock:
+        if _cached_creds is not None and _cached_creds.valid:
+            return _cached_creds
+
+        if _cached_creds is None:
+            _cached_creds = Credentials(
+                token=None,
+                refresh_token=os.environ["GOOGLE_REFRESH_TOKEN"],
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=os.environ["GOOGLE_CLIENT_ID"],
+                client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
+                scopes=SCOPES,
+            )
+
+        if not _cached_creds.valid:
+            _cached_creds.refresh(_timed_auth_request())
+        return _cached_creds
+
+
+def get_calendar_service():
     from googleapiclient.discovery import build
 
-    creds = Credentials(
-        token=None,
-        refresh_token=os.environ["GOOGLE_REFRESH_TOKEN"],
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.environ["GOOGLE_CLIENT_ID"],
-        client_secret=os.environ["GOOGLE_CLIENT_SECRET"],
-        scopes=SCOPES,
-    )
-    if not creds.valid:
-        creds.refresh(Request())
-    return build("calendar", "v3", credentials=creds, cache_discovery=False)
+    try:
+        import google_auth_httplib2
+        import httplib2
+
+        creds = _get_credentials()
+        http = httplib2.Http(timeout=GOOGLE_HTTP_TIMEOUT_SEC)
+        authed_http = google_auth_httplib2.AuthorizedHttp(creds, http=http)
+        return build("calendar", "v3", http=authed_http, cache_discovery=False)
+    except ImportError:
+        # Fallback if google_auth_httplib2 is unavailable — still reuse cached token.
+        from googleapiclient.discovery import build as build_svc
+
+        return build_svc(
+            "calendar",
+            "v3",
+            credentials=_get_credentials(),
+            cache_discovery=False,
+        )
 
 
 def _parse_date(date_str: str) -> datetime:
@@ -90,11 +210,7 @@ def _mock_events_for_date(date_str: str) -> List[Dict[str, Any]]:
     return events
 
 
-def list_events_for_date(date_str: str) -> List[Dict[str, Any]]:
-    """Return normalized events for YYYY-MM-DD."""
-    if not google_calendar_configured():
-        return _mock_events_for_date(date_str)
-
+def _list_google_events_for_date(date_str: str) -> List[Dict[str, Any]]:
     day_start = _parse_date(date_str)
     day_end = day_start + timedelta(days=1)
     service = get_calendar_service()
@@ -132,6 +248,61 @@ def list_events_for_date(date_str: str) -> List[Dict[str, Any]]:
     return events
 
 
+def _mock_fallback_events(date_str: str) -> List[Dict[str, Any]]:
+    global _last_fetch_degraded
+    _last_fetch_degraded = True
+    events = _mock_events_for_date(date_str)
+    for ev in events:
+        ev["source"] = "mock-fallback"
+    return events
+
+
+def _trip_circuit() -> None:
+    global _circuit_open_until
+    _circuit_open_until = time.monotonic() + GOOGLE_CIRCUIT_COOLDOWN_SEC
+
+
+def _circuit_is_open() -> bool:
+    return time.monotonic() < _circuit_open_until
+
+
+def list_events_for_date(date_str: str) -> List[Dict[str, Any]]:
+    """Return normalized events for YYYY-MM-DD.
+
+    Uses Google when configured. On transient network/timeout errors, falls back
+    to the local mock schedule so the UI and agent stay usable on flaky links.
+    """
+    global _last_fetch_degraded
+    _last_fetch_degraded = False
+
+    if not use_google_calendar():
+        return _mock_events_for_date(date_str)
+
+    if _circuit_is_open():
+        logger.info(
+            "Google Calendar circuit open; using mock schedule for %s", date_str
+        )
+        return _mock_fallback_events(date_str)
+
+    try:
+        return _list_google_events_for_date(date_str)
+    except Exception as exc:
+        if _is_transient_network_error(exc):
+            logger.warning(
+                "Google Calendar unreachable (%s); using mock schedule for %s",
+                exc,
+                date_str,
+            )
+            _trip_circuit()
+            return _mock_fallback_events(date_str)
+        raise
+
+
+def last_fetch_was_degraded() -> bool:
+    """True when the most recent list_events_for_date used mock-fallback."""
+    return _last_fetch_degraded
+
+
 def create_event(
     title: str,
     date_str: str,
@@ -143,7 +314,7 @@ def create_event(
     start_dt = _combine_date_time(date_str, time_str)
     end_dt = start_dt + timedelta(minutes=int(duration_minutes))
 
-    if not google_calendar_configured():
+    if not use_google_calendar():
         return {
             "id": f"mock-created-{date_str}-{time_str}",
             "summary": title,
@@ -153,7 +324,8 @@ def create_event(
             "source": "mock",
             "message": (
                 f"[Simulated booking] '{title}' on {date_str} at {time_str} "
-                f"({duration_minutes} mins). Set GOOGLE_* env vars for real Calendar."
+                f"({duration_minutes} mins). Set CALENDAR_MODE=google (with GOOGLE_* "
+                f"env vars) for real Calendar."
             ),
         }
 
@@ -165,12 +337,32 @@ def create_event(
     if attendee_email:
         body["attendees"] = [{"email": attendee_email}]
 
-    service = get_calendar_service()
-    created = (
-        service.events()
-        .insert(calendarId=_calendar_id(), body=body, sendUpdates="all" if attendee_email else "none")
-        .execute()
-    )
+    if _circuit_is_open():
+        raise RuntimeError(
+            "Google Calendar is temporarily unreachable (circuit open after timeout). "
+            "Retry in a minute, or clear GOOGLE_* env vars to use mock bookings."
+        )
+
+    try:
+        service = get_calendar_service()
+        created = (
+            service.events()
+            .insert(
+                calendarId=_calendar_id(),
+                body=body,
+                sendUpdates="all" if attendee_email else "none",
+            )
+            .execute()
+        )
+    except Exception as exc:
+        if _is_transient_network_error(exc):
+            _trip_circuit()
+            raise RuntimeError(
+                "Google Calendar is temporarily unreachable (network timeout). "
+                "Retry shortly, or clear GOOGLE_* env vars to use mock bookings."
+            ) from exc
+        raise
+
     return {
         "id": created.get("id"),
         "summary": created.get("summary"),
@@ -250,9 +442,22 @@ def _combine_date_time(date_str: str, time_str: str) -> datetime:
 
 
 def format_schedule_summary(date_str: str, events: List[Dict[str, Any]]) -> str:
+    degraded = _last_fetch_degraded or any(
+        ev.get("source") == "mock-fallback" for ev in events
+    )
     if not events:
-        return f"Schedule for {date_str}: no events. All slots open."
+        base = f"Schedule for {date_str}: no events. All slots open."
+        if degraded:
+            return (
+                base
+                + " (Google Calendar was unreachable; showing empty local fallback.)"
+            )
+        return base
     lines = [f"Schedule for {date_str}:"]
+    if degraded:
+        lines.append(
+            "(Google Calendar unreachable — showing local mock schedule until connectivity returns.)"
+        )
     for ev in events:
         try:
             start = datetime.fromisoformat(ev["start"]).strftime("%I:%M %p").lstrip("0")

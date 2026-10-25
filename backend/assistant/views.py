@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import date, timedelta
 
 from django.http import StreamingHttpResponse
 from rest_framework import status
@@ -12,8 +11,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .agent import run_executive_agent
-from .calendar_service import list_events_for_date
-from .memory import store_preference
+from .calendar_service import (
+    executive_today_iso,
+    executive_tomorrow_iso,
+    last_fetch_was_degraded,
+    list_events_for_date,
+)
+from .memory import delete_preference, list_preferences, store_preference
 from .models import PendingAction
 from .pending import approve_pending, list_pending, reject_pending
 from .tools import send_email_notification
@@ -105,12 +109,43 @@ class AddPreferenceView(APIView):
             )
 
 
+class PreferenceListView(APIView):
+    def get(self, request):
+        try:
+            items = list_preferences()
+            return Response({"items": items})
+        except Exception as exc:
+            return Response(
+                {"error": "Failed to list preferences", "detail": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+
+class PreferenceDeleteView(APIView):
+    def delete(self, request, pk: int):
+        try:
+            msg = delete_preference(pk)
+            return Response({"status": "success", "message": msg})
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as exc:
+            return Response(
+                {"error": "Failed to delete preference", "detail": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+
 class CalendarEventsView(APIView):
     def get(self, request):
-        date_str = request.query_params.get("date") or date.today().isoformat()
+        date_str = request.query_params.get("date") or executive_today_iso()
         try:
             events = list_events_for_date(date_str)
-            return Response({"date": date_str, "events": events})
+            payload = {"date": date_str, "events": events}
+            if last_fetch_was_degraded():
+                payload["warning"] = (
+                    "Google Calendar unreachable; showing local mock schedule."
+                )
+            return Response(payload)
         except Exception as exc:
             return Response(
                 {"error": "Failed to load calendar", "detail": str(exc)},
@@ -202,7 +237,7 @@ class DailyBriefingJobView(APIView):
         if secret and provided != secret:
             return Response({"error": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
 
-        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        tomorrow = executive_tomorrow_iso()
         events = list_events_for_date(tomorrow)
         lines = [f"Daily briefing for {tomorrow}:"]
         if not events:
@@ -220,7 +255,6 @@ class DailyBriefingJobView(APIView):
         to_email = (
             request.data.get("to_email")
             or os.environ.get("EXECUTIVE_EMAIL")
-            or os.environ.get("SENDGRID_FROM_EMAIL")
             or "executive@example.com"
         )
         mail_result = send_email_notification(

@@ -67,6 +67,31 @@ class ApiContractTests(TestCase):
         self.assertEqual(res.data["status"], "success")
         self.assertEqual(res.data["preference"], "No meetings before 10 AM")
 
+    @patch(
+        "assistant.views.list_preferences",
+        return_value=[{"id": 3, "content": "No meetings on monday"}],
+    )
+    def test_preference_list(self, _list):
+        res = self.client.get("/api/agent/preferences/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(res.data["items"]), 1)
+        self.assertEqual(res.data["items"][0]["id"], 3)
+
+    @patch(
+        "assistant.views.delete_preference",
+        return_value="Deleted preference: 'No meetings on monday'",
+    )
+    def test_preference_delete(self, _delete):
+        res = self.client.delete("/api/agent/preference/3/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["status"], "success")
+        _delete.assert_called_once_with(3)
+
+    @patch("assistant.views.delete_preference", side_effect=ValueError("Preference id=9 not found"))
+    def test_preference_delete_not_found(self, _delete):
+        res = self.client.delete("/api/agent/preference/9/")
+        self.assertEqual(res.status_code, 404)
+
     def test_calendar_events(self):
         res = self.client.get("/api/calendar/events/?date=2026-10-26")
         self.assertEqual(res.status_code, 200)
